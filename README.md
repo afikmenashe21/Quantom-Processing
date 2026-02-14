@@ -93,9 +93,36 @@ curl http://localhost:8000/healthz
 | `TASKS_QUEUE` | `tasks.queue` | RabbitMQ queue name |
 | `TASKS_ROUTING_KEY` | `tasks.queued` | RabbitMQ routing key |
 
-## Running Integration Tests
+## Tests
 
-With services running:
+### Unit Tests
+
+58 unit tests covering all service logic with mocked dependencies.
+
+| Service | Tests | Line Coverage |
+|---------|-------|---------------|
+| API (routes, repository) | 14 | 95% |
+| Publisher (drain, outbox repo, RMQ client) | 30 | 88% |
+| Worker (message handler, DB repo, task processor) | 14 | 90% |
+
+Since all three services share the `app` package name, unit tests must run per-service in separate processes:
+
+```bash
+# Run all unit tests (subprocess isolation per service)
+python3 tests/run_unit_tests.py
+
+# With coverage
+python3 tests/run_unit_tests.py --cov --cov-report=term-missing
+
+# Single service
+pytest tests/unit/api/ -v
+pytest tests/unit/publisher/ -v
+pytest tests/unit/worker/ -v
+```
+
+### Integration Tests
+
+5 end-to-end tests that exercise the full stack (requires `docker compose up`):
 
 ```bash
 pip install -r tests/requirements.txt
@@ -118,5 +145,10 @@ services/
 deploy/
   docker-compose.yml
 tests/
+  unit/           # Per-service unit tests (mocked dependencies)
+    api/          # Route branches, repository logic
+    publisher/    # Outbox drain, backoff, RabbitMQ client
+    worker/       # Message handler, DB repo, task processor
   integration/    # End-to-end integration tests
+  run_unit_tests.py  # Subprocess runner for cross-service isolation
 ```
