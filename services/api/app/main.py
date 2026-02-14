@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 
 from alembic import command
 from alembic.config import Config
@@ -17,11 +18,12 @@ def run_migrations() -> None:
     logger.info("migrations_applied")
 
 
-app = FastAPI(title="Quantom Processing API")
-app.include_router(router)
-
-
-@app.on_event("startup")
-def on_startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     run_migrations()
     logger.info("api_started")
+    yield
+
+
+app = FastAPI(title="Quantom Processing API", lifespan=lifespan)
+app.include_router(router)

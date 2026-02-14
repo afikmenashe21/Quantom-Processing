@@ -1,3 +1,4 @@
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -8,31 +9,25 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 
-def load_task(db: Session, task_id: uuid.UUID) -> dict | None:
-    row = db.execute(
-        text("SELECT id, status, qc FROM tasks WHERE id = :id"),
-        {"id": task_id},
-    ).fetchone()
-    if row is None:
-        return None
-    return {"id": row.id, "status": row.status, "qc": row.qc}
-
-
-def try_transition_to_processing(db: Session, task_id: uuid.UUID) -> bool:
-    """Atomically transition queued -> processing. Returns True if successful."""
+def try_claim_task(db: Session, task_id: uuid.UUID) -> dict | None:
+    """Atomically transition queued -> processing and return task data.
+    Returns None if task doesn't exist or is not in 'queued' status.
+    """
     result = db.execute(
         text(
             "UPDATE tasks SET status = 'processing', processing_started_at = :now, updated_at = :now "
-            "WHERE id = :id AND status = 'queued'"
+            "WHERE id = :id AND status = 'queued' "
+            "RETURNING id, qc"
         ),
         {"id": task_id, "now": datetime.now(timezone.utc)},
-    )
+    ).fetchone()
     db.commit()
-    return result.rowcount > 0
+    if result is None:
+        return None
+    return {"id": result.id, "qc": result.qc}
 
 
 def mark_completed(db: Session, task_id: uuid.UUID, result_json: dict) -> None:
-    import json
     db.execute(
         text(
             "UPDATE tasks SET status = 'completed', result_json = CAST(:result AS JSONB), "

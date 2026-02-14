@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
-from app.db_repository import load_task, mark_completed, mark_failed, try_transition_to_processing
+from app.db_repository import mark_completed, mark_failed, try_claim_task
 from app.logging import setup_logging
 from app.rabbitmq_client import create_connection, setup_channel
 from app.task_processor import execute_qasm3
@@ -40,26 +40,11 @@ def handle_message(
     logger.info("worker_received task_id=%s", task_id)
 
     with session_factory() as db:
-        task = load_task(db, task_id)
-
+        # Single atomic operation: claim the task (queued -> processing) and get qc
+        task = try_claim_task(db, task_id)
         if task is None:
-            logger.warning("task_not_found task_id=%s", task_id)
-            channel.basic_ack(delivery_tag=method.delivery_tag)
-            return
-
-        if task["status"] == "completed":
-            logger.info("task_already_completed task_id=%s", task_id)
-            channel.basic_ack(delivery_tag=method.delivery_tag)
-            return
-
-        if task["status"] in ("processing", "failed"):
-            logger.info("task_skip status=%s task_id=%s", task["status"], task_id)
-            channel.basic_ack(delivery_tag=method.delivery_tag)
-            return
-
-        # Atomic transition queued -> processing
-        if not try_transition_to_processing(db, task_id):
-            logger.info("task_transition_failed task_id=%s", task_id)
+            # Task doesn't exist or is already processing/completed/failed
+            logger.info("task_skip task_id=%s (not claimable)", task_id)
             channel.basic_ack(delivery_tag=method.delivery_tag)
             return
 

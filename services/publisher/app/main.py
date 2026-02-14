@@ -29,14 +29,16 @@ def drain_outbox_batch(session_factory: sessionmaker, rmq: RabbitMQClient) -> in
             try:
                 rmq.publish(task_id)
                 mark_sent(db, row["id"])
+                db.commit()
                 published += 1
                 logger.info("outbox_published outbox_id=%s task_id=%s", row["id"], task_id)
             except Exception as e:
+                db.rollback()
                 logger.warning(
                     "outbox_publish_failed outbox_id=%s error=%s", row["id"], e
                 )
                 mark_attempt_failed(db, row["id"], row["attempts"], str(e))
-        db.commit()
+                db.commit()
     return published
 
 

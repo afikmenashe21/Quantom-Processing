@@ -51,6 +51,7 @@ class RabbitMQClient:
 
     def publish(self, task_id: str) -> None:
         if self._channel is None or self._channel.is_closed:
+            self._close_silently()
             self.connect()
         self._channel.basic_publish(
             exchange=settings.tasks_exchange,
@@ -61,6 +62,15 @@ class RabbitMQClient:
                 content_type="application/json",
             ),
         )
+
+    def _close_silently(self) -> None:
+        try:
+            if self._connection and not self._connection.is_closed:
+                self._connection.close()
+        except Exception:
+            pass
+        self._connection = None
+        self._channel = None
 
     def close(self) -> None:
         if self._connection and not self._connection.is_closed:
