@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: quantom
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d quantom"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: user
+      RABBITMQ_DEFAULT_PASS: pass
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ../
+      dockerfile: services/api/Dockerfile
+    ports:
+      - "8000:8000"
+    environment: &common-env
+      DATABASE_URL: "postgresql+psycopg://user:pass@postgres:5432/quantom"
+      RABBITMQ_URL: "amqp://user:pass@rabbitmq:5672/"
+      TASKS_EXCHANGE: "tasks.exchange"
+      TASKS_QUEUE: "tasks.queue"
+      TASKS_ROUTING_KEY: "tasks.queued"
+      SHOTS: "1024"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  publisher:
+    build:
+      context: ../services/publisher
+    environment:
+      <<: *common-env
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ../services/worker
+    environment:
+      <<: *common-env
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
