@@ -2,6 +2,8 @@ import logging
 
 import pika
 
+from shared.rabbitmq import declare_topology
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -10,35 +12,20 @@ logger = logging.getLogger(__name__)
 def create_connection() -> pika.BlockingConnection:
     params = pika.URLParameters(settings.rabbitmq_url)
     params.heartbeat = 60
-    return pika.BlockingConnection(params)
+    conn = pika.BlockingConnection(params)
+    logger.info("rabbitmq_connection_created")
+    return conn
 
 
 def setup_channel(connection: pika.BlockingConnection) -> pika.adapters.blocking_connection.BlockingChannel:
     channel = connection.channel()
     channel.basic_qos(prefetch_count=1)
 
-    # Declare exchange
-    channel.exchange_declare(
-        exchange=settings.tasks_exchange, exchange_type="direct", durable=True
-    )
-
-    # Declare DLX + DLQ
-    channel.exchange_declare(exchange="tasks.dlx", exchange_type="direct", durable=True)
-    channel.queue_declare(queue="tasks.dlq", durable=True)
-    channel.queue_bind(queue="tasks.dlq", exchange="tasks.dlx", routing_key=settings.tasks_routing_key)
-
-    # Declare main queue with DLQ
-    channel.queue_declare(
-        queue=settings.tasks_queue,
-        durable=True,
-        arguments={
-            "x-dead-letter-exchange": "tasks.dlx",
-            "x-dead-letter-routing-key": settings.tasks_routing_key,
-        },
-    )
-    channel.queue_bind(
-        queue=settings.tasks_queue,
+    declare_topology(
+        channel,
         exchange=settings.tasks_exchange,
+        queue=settings.tasks_queue,
         routing_key=settings.tasks_routing_key,
     )
+    logger.info("rabbitmq_channel_ready exchange=%s queue=%s", settings.tasks_exchange, settings.tasks_queue)
     return channel

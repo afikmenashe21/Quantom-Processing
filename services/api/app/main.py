@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def run_migrations() -> None:
+    logger.info("applying_migrations")
     cfg = Config("alembic.ini")
     command.upgrade(cfg, "head")
     logger.info("migrations_applied")

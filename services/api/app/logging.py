@@ -1,17 +1,5 @@
-import logging
-import sys
+from shared.logging import setup_logging as _setup_logging
 
 
 def setup_logging() -> None:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter(
-            fmt="%(asctime)s level=%(levelname)s logger=%(name)s %(message)s",
-            datefmt="%Y-%m-%dT%H:%M:%S",
-        )
-    )
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    root.addHandler(handler)
-
-    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    _setup_logging(suppress_uvicorn=True)

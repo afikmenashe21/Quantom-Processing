@@ -55,7 +55,8 @@ services:
 
   publisher:
     build:
-      context: ../services/publisher
+      context: ../
+      dockerfile: services/publisher/Dockerfile
     environment:
       <<: *common-env
     depends_on:
@@ -65,7 +66,8 @@ services:
 
   worker:
     build:
-      context: ../services/worker
+      context: ../
+      dockerfile: services/worker/Dockerfile
     environment:
       <<: *common-env
     depends_on:

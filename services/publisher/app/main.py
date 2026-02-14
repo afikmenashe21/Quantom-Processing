@@ -2,8 +2,8 @@ import logging
 import time
 
 import psycopg
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+
+from shared.db import build_session_factory
 
 from app.config import settings
 from app.logging import setup_logging
@@ -14,18 +14,23 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 
-def build_session_factory() -> sessionmaker:
-    engine = create_engine(settings.database_url, pool_pre_ping=True, pool_size=2)
-    return sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+def extract_task_id(row: dict) -> str:
+    """Extract task_id from outbox row payload with fallback to aggregate_id."""
+    task_id = row["payload"].get("task_id", row["aggregate_id"])
+    if task_id != row["payload"].get("task_id"):
+        logger.warning("task_id_fallback outbox_id=%s using aggregate_id=%s", row["id"], task_id)
+    return task_id
 
 
-def drain_outbox_batch(session_factory: sessionmaker, rmq: RabbitMQClient) -> int:
+def drain_outbox_batch(session_factory, rmq: RabbitMQClient) -> int:
     """Claim and publish pending outbox rows. Returns number published."""
     published = 0
     with session_factory() as db:
         rows = claim_pending_rows(db, settings.outbox_batch_size)
+        if rows:
+            logger.debug("outbox_rows_claimed count=%d", len(rows))
         for row in rows:
-            task_id = row["payload"].get("task_id", row["aggregate_id"])
+            task_id = extract_task_id(row)
             try:
                 rmq.publish(task_id)
                 mark_sent(db, row["id"])
@@ -39,26 +44,30 @@ def drain_outbox_batch(session_factory: sessionmaker, rmq: RabbitMQClient) -> in
                 )
                 mark_attempt_failed(db, row["id"], row["attempts"], str(e))
                 db.commit()
+    if rows:
+        logger.info("drain_batch_complete published=%d total=%d", published, len(rows))
     return published
 
 
 def get_listen_dsn() -> str:
     """Convert SQLAlchemy URL to psycopg DSN for LISTEN."""
     url = settings.database_url
-    # postgresql+psycopg://user:pass@host:port/db -> postgresql://user:pass@host:port/db
     if "+psycopg" in url:
         url = url.replace("+psycopg", "")
     return url
 
 
 def run() -> None:
-    session_factory = build_session_factory()
+    session_factory = build_session_factory(settings.database_url, pool_size=2)
+    logger.info("db_session_factory_created")
+
     rmq = RabbitMQClient()
 
     # Connect to RabbitMQ with retry
     while True:
         try:
             rmq.connect()
+            logger.info("rabbitmq_connected")
             break
         except Exception as e:
             logger.warning("rabbitmq_connect_retry error=%s", e)
@@ -80,7 +89,6 @@ def run() -> None:
                 logger.info("listening channel=%s", settings.outbox_listen_channel)
 
                 while True:
-                    # Wait for notifications with poll timeout
                     gen = conn.notifies(timeout=settings.outbox_poll_interval_sec)
                     for notify in gen:
                         logger.info("notify_received payload=%s", notify.payload)
@@ -88,9 +96,9 @@ def run() -> None:
                             drain_outbox_batch(session_factory, rmq)
                         except Exception as e:
                             logger.error("drain_error error=%s", e)
-                        break  # After processing, re-enter to reset timeout
+                        break
 
-                    # Poll fallback: drain even without notification
+                    # Poll fallback
                     try:
                         drain_outbox_batch(session_factory, rmq)
                     except Exception as e:

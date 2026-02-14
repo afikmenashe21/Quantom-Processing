@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from shared.constants import OutboxStatus
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -33,7 +35,7 @@ def claim_pending_rows(db: Session, batch_size: int) -> list[dict]:
         ),
         {"batch": batch_size},
     )
-    return [
+    rows = [
         {
             "id": row.id,
             "aggregate_id": str(row.aggregate_id),
@@ -42,21 +44,24 @@ def claim_pending_rows(db: Session, batch_size: int) -> list[dict]:
         }
         for row in result
     ]
+    if rows:
+        logger.debug("outbox_claimed rows=%d", len(rows))
+    return rows
 
 
 def mark_sent(db: Session, outbox_id: int) -> None:
     db.execute(
         text(
-            "UPDATE outbox SET status = 'sent', sent_at = :now "
+            "UPDATE outbox SET status = :status, sent_at = :now "
             "WHERE id = :id"
         ),
-        {"id": outbox_id, "now": datetime.now(timezone.utc)},
+        {"id": outbox_id, "now": datetime.now(timezone.utc), "status": OutboxStatus.SENT},
     )
 
 
 def mark_attempt_failed(db: Session, outbox_id: int, attempts: int, error: str) -> None:
     new_attempts = attempts + 1
-    new_status = "failed" if new_attempts >= settings.outbox_max_attempts else "pending"
+    new_status = OutboxStatus.FAILED if new_attempts >= settings.outbox_max_attempts else OutboxStatus.PENDING
     db.execute(
         text(
             "UPDATE outbox SET attempts = :attempts, last_error = :error, status = :status, "
@@ -70,5 +75,5 @@ def mark_attempt_failed(db: Session, outbox_id: int, attempts: int, error: str) 
             "now": datetime.now(timezone.utc),
         },
     )
-    if new_status == "failed":
+    if new_status == OutboxStatus.FAILED:
         logger.error("outbox_exhausted outbox_id=%s attempts=%s", outbox_id, new_attempts)

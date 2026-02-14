@@ -3,6 +3,9 @@ import logging
 
 import pika
 
+from shared.constants import RMQ_DLX, RMQ_DLQ
+from shared.rabbitmq import declare_topology
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -19,38 +22,17 @@ class RabbitMQClient:
         self._connection = pika.BlockingConnection(params)
         self._channel = self._connection.channel()
 
-        # Declare exchange
-        self._channel.exchange_declare(
-            exchange=settings.tasks_exchange, exchange_type="direct", durable=True
-        )
-
-        # Declare DLX + DLQ
-        self._channel.exchange_declare(
-            exchange="tasks.dlx", exchange_type="direct", durable=True
-        )
-        self._channel.queue_declare(queue="tasks.dlq", durable=True)
-        self._channel.queue_bind(
-            queue="tasks.dlq", exchange="tasks.dlx", routing_key=settings.tasks_routing_key
-        )
-
-        # Declare main queue with DLQ binding
-        self._channel.queue_declare(
-            queue=settings.tasks_queue,
-            durable=True,
-            arguments={
-                "x-dead-letter-exchange": "tasks.dlx",
-                "x-dead-letter-routing-key": settings.tasks_routing_key,
-            },
-        )
-        self._channel.queue_bind(
-            queue=settings.tasks_queue,
+        declare_topology(
+            self._channel,
             exchange=settings.tasks_exchange,
+            queue=settings.tasks_queue,
             routing_key=settings.tasks_routing_key,
         )
-        logger.info("rabbitmq_connected")
+        logger.info("rabbitmq_topology_declared exchange=%s queue=%s", settings.tasks_exchange, settings.tasks_queue)
 
     def publish(self, task_id: str) -> None:
         if self._channel is None or self._channel.is_closed:
+            logger.warning("rabbitmq_channel_reconnecting")
             self._close_silently()
             self.connect()
         self._channel.basic_publish(

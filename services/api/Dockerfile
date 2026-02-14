@@ -5,6 +5,7 @@ WORKDIR /app
 COPY services/api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY services/shared/ ./shared/
 COPY services/api/app/ ./app/
 COPY services/api/migrations/ ./migrations/
 COPY services/api/alembic.ini .

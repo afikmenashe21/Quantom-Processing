@@ -5,8 +5,8 @@ import traceback
 import uuid
 
 import pika
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+
+from shared.db import build_session_factory
 
 from app.config import settings
 from app.db_repository import mark_completed, mark_failed, try_claim_task
@@ -18,13 +18,8 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 
-def build_session_factory() -> sessionmaker:
-    engine = create_engine(settings.database_url, pool_pre_ping=True, pool_size=2)
-    return sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
-
-
 def handle_message(
-    session_factory: sessionmaker,
+    session_factory,
     channel: pika.adapters.blocking_connection.BlockingChannel,
     method: pika.spec.Basic.Deliver,
     body: bytes,
@@ -40,10 +35,8 @@ def handle_message(
     logger.info("worker_received task_id=%s", task_id)
 
     with session_factory() as db:
-        # Single atomic operation: claim the task (queued -> processing) and get qc
         task = try_claim_task(db, task_id)
         if task is None:
-            # Task doesn't exist or is already processing/completed/failed
             logger.info("task_skip task_id=%s (not claimable)", task_id)
             channel.basic_ack(delivery_tag=method.delivery_tag)
             return
@@ -63,8 +56,11 @@ def handle_message(
 
 
 def run() -> None:
-    session_factory = build_session_factory()
-    logger.info("worker_starting shots=%s", settings.shots)
+    session_factory = build_session_factory(settings.database_url, pool_size=2)
+    logger.info(
+        "worker_starting shots=%s rabbitmq_url=%s tasks_queue=%s tasks_exchange=%s",
+        settings.shots, settings.rabbitmq_url, settings.tasks_queue, settings.tasks_exchange,
+    )
 
     while True:
         try:
