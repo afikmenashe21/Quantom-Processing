@@ -70,10 +70,17 @@ services:
       dockerfile: services/worker/Dockerfile
     environment:
       <<: *common-env
+      WORKER_CONCURRENCY: "2"
     depends_on:
       api:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
 
 volumes:
   pgdata:

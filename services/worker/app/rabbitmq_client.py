@@ -17,9 +17,12 @@ def create_connection() -> pika.BlockingConnection:
     return conn
 
 
-def setup_channel(connection: pika.BlockingConnection) -> pika.adapters.blocking_connection.BlockingChannel:
+def setup_channel(
+    connection: pika.BlockingConnection,
+    prefetch_count: int = 1,
+) -> pika.adapters.blocking_connection.BlockingChannel:
     channel = connection.channel()
-    channel.basic_qos(prefetch_count=1)
+    channel.basic_qos(prefetch_count=prefetch_count)
 
     declare_topology(
         channel,
