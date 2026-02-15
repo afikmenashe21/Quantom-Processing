@@ -38,7 +38,7 @@ Asynchronous quantum circuit simulation pipeline built with **FastAPI**, **Postg
 |---------|------|
 | **API** | REST endpoints. Persists tasks + outbox events in a single DB transaction. Runs Alembic migrations on startup. |
 | **Publisher** | Reads outbox table via LISTEN/NOTIFY + poll fallback. Publishes to RabbitMQ. Uses `FOR UPDATE SKIP LOCKED` for safe concurrency. |
-| **Worker** | Consumes RabbitMQ queue. Parses QASM3, runs AerSimulator, stores results. Idempotent — ack only after DB commit. |
+| **Worker** | Consumes RabbitMQ queue. Parses QASM3, runs AerSimulator via `ProcessPoolExecutor`, stores results. Idempotent — ack only after DB commit. |
 | **PostgreSQL** | Source of truth for task state, results, and transactional outbox. |
 | **RabbitMQ** | Task queue with DLQ for failed messages. |
 
@@ -46,6 +46,7 @@ Asynchronous quantum circuit simulation pipeline built with **FastAPI**, **Postg
 
 - **Transactional Outbox Pattern**: The API never publishes to RabbitMQ directly. Task + outbox event are written in a single DB transaction, guaranteeing no lost tasks even if RabbitMQ is down.
 - **LISTEN/NOTIFY + Poll Fallback**: Publisher reacts immediately to new outbox rows via Postgres notifications, with a periodic poll (default 10s) as a safety net.
+- **Concurrent Worker**: `ProcessPoolExecutor` runs simulations in parallel (configurable via `WORKER_CONCURRENCY`). The main thread handles RabbitMQ I/O while child processes execute CPU-bound Qiskit simulations. Graceful shutdown drains in-flight futures before exit.
 - **Idempotent Worker**: Atomic `queued -> processing` transition prevents duplicate computation. Already-completed tasks are skipped.
 - **DLQ**: Failed messages go to a dead-letter queue instead of infinite requeue loops.
 - **Shared Package**: Common code (logging, DB session factory, RabbitMQ topology, constants) lives in `services/shared/` and is imported by all three services.
@@ -239,6 +240,7 @@ All services are configured via environment variables. Defaults are set for loca
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SHOTS` | `1024` | Number of simulation shots per circuit. Must be a positive integer. |
+| `WORKER_CONCURRENCY` | CPU count | Number of parallel `ProcessPoolExecutor` workers for circuit simulation. |
 
 ## Project Structure
 
@@ -266,10 +268,10 @@ services/
       config.py
     Dockerfile
     requirements.txt
-  worker/           # RabbitMQ consumer + Qiskit/Aer executor
+  worker/           # RabbitMQ consumer + Qiskit/Aer executor (ProcessPoolExecutor)
     app/
-      main.py       # Consumer loop with reconnect
-      task_processor.py     # QASM3 parse + AerSimulator execution
+      main.py       # Consumer loop with concurrent pool + reconnect
+      task_processor.py     # QASM3 parse + AerSimulator execution (runs in child process)
       db_repository.py      # Atomic task claim + result storage
       rabbitmq_client.py    # Connection + channel setup
       config.py
@@ -283,6 +285,8 @@ tests/
     publisher/          # Outbox drain, backoff, RabbitMQ client
     worker/             # Message handler, DB repo, task processor
   integration/          # End-to-end tests (requires running stack)
+  load/                 # Load testing
+    load_test.py        # Async load test script (httpx + asyncio)
   run_unit_tests.py     # Subprocess runner for cross-service isolation
   conftest.py           # Shared fixtures (mock session, channel, method)
   requirements.txt      # Test dependencies
@@ -292,13 +296,13 @@ tests/
 
 ### Unit Tests
 
-58 unit tests covering all service logic with mocked dependencies.
+Unit tests covering all service logic with mocked dependencies.
 
 | Suite | Tests | Coverage |
 |-------|-------|----------|
 | API (routes, repository) | 14 | ~95% |
 | Publisher (drain, outbox repo, RMQ client) | 30 | ~88% |
-| Worker (message handler, DB repo, task processor) | 14 | ~90% |
+| Worker (message handler, DB repo, task processor, concurrency) | 23 | ~90% |
 
 Since all three services share the `app` package name, unit tests run per-service in separate processes:
 
@@ -334,6 +338,31 @@ Integration test cases:
 1. **Submit and complete** — POST a circuit, poll until completed, verify counts sum equals SHOTS.
 2. **Task not found** — GET with random UUID returns not-found response.
 3. **Invalid payload** — POST with missing/empty `qc` returns 422.
+
+### Load Test
+
+Standalone async load test script that validates the pipeline under concurrent load. Submits N tasks, polls until completion, validates correctness, and reports throughput/latency metrics.
+
+```bash
+# Run with defaults (20 tasks, concurrency=10)
+python3 tests/load/load_test.py
+
+# Custom parameters
+python3 tests/load/load_test.py --tasks 200 --concurrency 20 --timeout 300
+
+# All options
+python3 tests/load/load_test.py --help
+```
+
+| Option | Env var | Default | Description |
+|--------|---------|---------|-------------|
+| `--tasks` | `LOAD_TEST_TASKS` | `20` | Number of tasks to submit |
+| `--concurrency` | `LOAD_TEST_CONCURRENCY` | `10` | Max concurrent HTTP submissions |
+| `--base-url` | `LOAD_TEST_BASE_URL` | `http://localhost:8000` | API base URL |
+| `--timeout` | `LOAD_TEST_TIMEOUT` | `120` | Per-task poll timeout (seconds) |
+| `--shots` | `SHOTS` | `1024` | Expected shots for correctness validation |
+
+The test uses 3 circuit variants (1-qubit, 3-qubit GHZ, 5-qubit entangled) randomly assigned to simulate mixed workloads. Output includes per-circuit breakdown, P50/P95 latencies, and a PASS/FAIL verdict.
 
 ## Database Schema
 
@@ -375,16 +404,23 @@ Indexes: `(status, created_at)`, `aggregate_id`
 
 ### Logging
 
-All services use structured key-value logging to stdout:
+All services use structured key-value logging to stdout with service name tags and credential masking:
 
 ```
-2025-01-15T10:30:45 level=INFO logger=app.main task_created task_id=a1b2c3d4-...
+2026-02-15T10:56:25 [worker] level=INFO logger=__main__ task_claimed_and_submitted task_id=ac952ba2-... delivery_tag=1 in_flight=1
+2026-02-15T10:56:25 [worker] level=INFO logger=app.task_processor qasm3_executed task_id=ac952ba2-... qubits=1 shots=1024 elapsed_ms=2
 ```
 
 Key log events:
-- **API**: `task_created`, `task_not_found`, `task_failed_response`, `qc_payload_too_large`, `applying_migrations`, `migrations_applied`
-- **Publisher**: `outbox_published`, `outbox_publish_failed`, `outbox_exhausted`, `drain_batch_complete`, `notify_received`, `rabbitmq_channel_reconnecting`
-- **Worker**: `worker_received`, `task_claimed`, `task_claim_missed`, `task_completed`, `task_failed`, `task_marked_completed`, `task_marked_failed`, `qasm3_executed`
+- **API**: `task_created`, `task_not_found`, `task_failed_response`, `qc_payload_too_large`, `applying_migrations`
+- **Publisher**: `outbox_published`, `outbox_publish_failed`, `drain_batch_complete`, `rabbitmq_channel_reconnecting`
+- **Worker**: `task_claimed_and_submitted`, `task_skipped`, `task_completed`, `task_failed`, `qasm3_executed`, `worker_starting`, `worker_shutdown_complete`
+
+Logging features:
+- **Service tags**: Each log line includes `[api]`, `[publisher]`, or `[worker]` for easy filtering in `docker compose logs`.
+- **Credential masking**: Passwords in connection URLs are automatically replaced with `***`.
+- **Noise suppression**: Pika and Alembic internal logs are suppressed to WARNING.
+- **Task correlation**: All worker log events include `task_id` for end-to-end tracing.
 
 ### RabbitMQ Topology
 
