@@ -22,10 +22,6 @@ from dataclasses import dataclass, field
 
 import httpx
 
-# ---------------------------------------------------------------------------
-# Circuit variants (mixed workload)
-# ---------------------------------------------------------------------------
-
 CIRCUITS = {
     "small_1q_hadamard": (
         'OPENQASM 3;\ninclude "stdgates.inc";\nqubit[1] q;\nbit[1] c;\nh q[0];\nc[0] = measure q[0];'
@@ -44,29 +40,26 @@ CIRCUITS = {
     ),
 }
 
-CIRCUIT_NAMES = list(CIRCUITS.keys())
-
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
+POLL_INTERVAL_SEC = 0.5
+MAX_POLL_CONNECTIONS = 100
 
 
 @dataclass
 class TaskResult:
     task_id: str
     circuit: str
-    submit_time: float  # epoch
-    submit_latency: float  # seconds
-    complete_time: float | None = None
+    submit_time: float
+    submit_latency: float
+    completed_at: float | None = None
     status: str = "pending"
     result: dict | None = None
     error: str | None = None
 
     @property
-    def completion_time(self) -> float | None:
-        if self.complete_time is None:
+    def duration(self) -> float | None:
+        if self.completed_at is None:
             return None
-        return self.complete_time - self.submit_time
+        return self.completed_at - self.submit_time
 
 
 @dataclass
@@ -76,21 +69,22 @@ class LoadTestConfig:
     base_url: str = "http://localhost:8000"
     timeout: int = 120
     shots: int = 1024
-    poll_interval: float = 0.5
 
 
 @dataclass
 class LoadTestReport:
     results: list[TaskResult] = field(default_factory=list)
-    submission_start: float = 0.0
-    submission_end: float = 0.0
     wall_start: float = 0.0
+    submission_end: float = 0.0
     wall_end: float = 0.0
 
+    @property
+    def submission_duration(self) -> float:
+        return self.submission_end - self.wall_start
 
-# ---------------------------------------------------------------------------
-# Core logic
-# ---------------------------------------------------------------------------
+    @property
+    def wall_duration(self) -> float:
+        return self.wall_end - self.wall_start
 
 
 async def submit_task(
@@ -119,7 +113,6 @@ async def poll_task(
     sem: asyncio.Semaphore,
     result: TaskResult,
     timeout: int,
-    poll_interval: float,
 ) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -128,7 +121,7 @@ async def poll_task(
                 resp = await client.get(f"/tasks/{result.task_id}")
             resp.raise_for_status()
         except (httpx.PoolTimeout, httpx.ConnectTimeout, httpx.ReadTimeout):
-            await asyncio.sleep(poll_interval)
+            await asyncio.sleep(POLL_INTERVAL_SEC)
             continue
 
         body = resp.json()
@@ -137,130 +130,133 @@ async def poll_task(
         if status == "completed":
             result.status = "completed"
             result.result = body.get("result")
-            result.complete_time = time.time()
+            result.completed_at = time.time()
             return
-        elif status == "error":
+        if status == "error":
             result.status = "failed"
             result.error = body.get("message", "unknown error")
-            result.complete_time = time.time()
+            result.completed_at = time.time()
             return
 
-        await asyncio.sleep(poll_interval)
+        await asyncio.sleep(POLL_INTERVAL_SEC)
 
     result.status = "timeout"
-    result.complete_time = time.time()
+    result.completed_at = time.time()
 
 
 async def run_load_test(cfg: LoadTestConfig) -> LoadTestReport:
     report = LoadTestReport()
     submit_sem = asyncio.Semaphore(cfg.concurrency)
-    # Allow more concurrent polls than submissions, but cap to avoid pool exhaustion
-    poll_sem = asyncio.Semaphore(min(cfg.tasks, 100))
+    poll_sem = asyncio.Semaphore(min(cfg.tasks, MAX_POLL_CONNECTIONS))
 
     pool_limits = httpx.Limits(
-        max_connections=200, max_keepalive_connections=50, keepalive_expiry=30
+        max_connections=MAX_POLL_CONNECTIONS * 2,
+        max_keepalive_connections=MAX_POLL_CONNECTIONS // 2,
+        keepalive_expiry=30,
     )
     async with httpx.AsyncClient(
         base_url=cfg.base_url,
         timeout=httpx.Timeout(30.0, pool=60.0),
         limits=pool_limits,
     ) as client:
-        # --- submission phase ---
-        circuits = [random.choice(CIRCUIT_NAMES) for _ in range(cfg.tasks)]
-        report.wall_start = report.submission_start = time.time()
+        circuit_names = list(CIRCUITS)
+        choices = [random.choice(circuit_names) for _ in range(cfg.tasks)]
+        report.wall_start = time.time()
 
-        submit_coros = [
-            submit_task(client, submit_sem, name, CIRCUITS[name]) for name in circuits
-        ]
-        report.results = await asyncio.gather(*submit_coros)
+        report.results = await asyncio.gather(
+            *(submit_task(client, submit_sem, n, CIRCUITS[n]) for n in choices)
+        )
         report.submission_end = time.time()
-
         print(
             f"Submitted {len(report.results)} tasks in "
-            f"{report.submission_end - report.submission_start:.2f}s"
+            f"{report.submission_duration:.2f}s"
         )
 
-        # --- polling phase ---
-        poll_coros = [
-            poll_task(client, poll_sem, r, cfg.timeout, cfg.poll_interval)
-            for r in report.results
-        ]
-        await asyncio.gather(*poll_coros)
+        await asyncio.gather(
+            *(poll_task(client, poll_sem, r, cfg.timeout) for r in report.results)
+        )
         report.wall_end = time.time()
 
     return report
 
 
-# ---------------------------------------------------------------------------
-# Reporting
-# ---------------------------------------------------------------------------
+# -- Reporting ----------------------------------------------------------------
 
 
 def print_report(report: LoadTestReport, expected_shots: int) -> bool:
     results = report.results
     total = len(results)
-    completed = [r for r in results if r.status == "completed"]
-    failed = [r for r in results if r.status == "failed"]
-    timed_out = [r for r in results if r.status == "timeout"]
+    by_status = _group_by_status(results)
+    completed = by_status.get("completed", [])
+    failed = by_status.get("failed", [])
+    timed_out = by_status.get("timeout", [])
 
-    # correctness check
-    correct = 0
-    for r in completed:
-        if r.result and sum(r.result.values()) == expected_shots:
-            correct += 1
-
-    completion_times = [
-        r.completion_time for r in completed if r.completion_time is not None
-    ]
+    correct = sum(
+        1 for r in completed if r.result and sum(r.result.values()) == expected_shots
+    )
+    durations = sorted(r.duration for r in completed if r.duration is not None)
     submit_lats = [r.submit_latency for r in results]
 
-    sub_duration = report.submission_end - report.submission_start
-    wall_duration = report.wall_end - report.wall_start
-    throughput = len(completed) / wall_duration if wall_duration > 0 else 0
+    throughput = len(completed) / report.wall_duration if report.wall_duration > 0 else 0
+    sub_rate = total / report.submission_duration if report.submission_duration > 0 else float("inf")
 
     print("\n=== Load Test Results ===")
     print(f"Tasks submitted:   {total}")
     print(f"Tasks completed:   {len(completed)}")
     print(f"Tasks failed:      {len(failed)}")
     print(f"Tasks timed out:   {len(timed_out)}")
-    print(
-        f"Correctness:       {correct}/{len(completed)} "
-        f"(sum(counts) == {expected_shots})"
-    )
+    print(f"Correctness:       {correct}/{len(completed)} (sum(counts) == {expected_shots})")
 
     print()
-    sub_rate = total / sub_duration if sub_duration > 0 else float("inf")
-    print(f"Submission phase:  {sub_duration:.2f}s ({sub_rate:.1f} tasks/sec)")
+    print(f"Submission phase:  {report.submission_duration:.2f}s ({sub_rate:.1f} tasks/sec)")
     print(f"Avg submit lat:    {statistics.mean(submit_lats) * 1000:.0f}ms")
-    print(f"Total wall time:   {wall_duration:.1f}s")
+    print(f"Total wall time:   {report.wall_duration:.1f}s")
     print(f"Throughput:        {throughput:.2f} tasks/sec")
 
-    if completion_times:
-        completion_times.sort()
-        print(f"Avg completion:    {statistics.mean(completion_times):.1f}s")
-        print(f"Min completion:    {min(completion_times):.1f}s")
-        print(f"Max completion:    {max(completion_times):.1f}s")
-        print(f"P50 completion:    {_percentile(completion_times, 50):.1f}s")
-        print(f"P95 completion:    {_percentile(completion_times, 95):.1f}s")
+    if durations:
+        print(f"Avg completion:    {statistics.mean(durations):.1f}s")
+        print(f"Min completion:    {durations[0]:.1f}s")
+        print(f"Max completion:    {durations[-1]:.1f}s")
+        print(f"P50 completion:    {_percentile(durations, 50):.1f}s")
+        print(f"P95 completion:    {_percentile(durations, 95):.1f}s")
 
-    # per-circuit breakdown
-    circuit_stats: dict[str, list[float]] = {}
+    _print_circuit_breakdown(completed)
+    _print_failures(failed, timed_out)
+
+    all_ok = len(completed) == total and correct == len(completed)
+    print(f"\nOverall: {'PASS' if all_ok else 'FAIL'}")
+    return all_ok
+
+
+def _group_by_status(results: list[TaskResult]) -> dict[str, list[TaskResult]]:
+    groups: dict[str, list[TaskResult]] = {}
+    for r in results:
+        groups.setdefault(r.status, []).append(r)
+    return groups
+
+
+def _print_circuit_breakdown(completed: list[TaskResult]) -> None:
+    circuit_durations: dict[str, list[float]] = {}
     for r in completed:
-        if r.completion_time is not None:
-            circuit_stats.setdefault(r.circuit, []).append(r.completion_time)
+        if r.duration is not None:
+            circuit_durations.setdefault(r.circuit, []).append(r.duration)
 
-    if circuit_stats:
-        print("\n--- Per-circuit breakdown ---")
-        for name in CIRCUIT_NAMES:
-            times = circuit_stats.get(name, [])
-            if times:
-                print(
-                    f"  {name}: n={len(times)}, "
-                    f"avg={statistics.mean(times):.1f}s, "
-                    f"p50={_percentile(sorted(times), 50):.1f}s"
-                )
+    if not circuit_durations:
+        return
 
-    # failure details
+    print("\n--- Per-circuit breakdown ---")
+    for name, times in sorted(circuit_durations.items()):
+        times.sort()
+        print(
+            f"  {name}: n={len(times)}, "
+            f"avg={statistics.mean(times):.1f}s, "
+            f"p50={_percentile(times, 50):.1f}s"
+        )
+
+
+def _print_failures(
+    failed: list[TaskResult], timed_out: list[TaskResult]
+) -> None:
     if failed:
         print("\n--- Failed tasks ---")
         for r in failed:
@@ -270,56 +266,45 @@ def print_report(report: LoadTestReport, expected_shots: int) -> bool:
         for r in timed_out:
             print(f"  {r.task_id} ({r.circuit})")
 
-    all_ok = len(completed) == total and correct == len(completed)
-    print(f"\nOverall: {'PASS' if all_ok else 'FAIL'}")
-    return all_ok
-
 
 def _percentile(sorted_data: list[float], p: float) -> float:
     if not sorted_data:
         return 0.0
-    k = (len(sorted_data) - 1) * (p / 100)
-    f = int(k)
-    c = f + 1
-    if c >= len(sorted_data):
-        return sorted_data[f]
-    return sorted_data[f] + (k - f) * (sorted_data[c] - sorted_data[f])
+    idx = (len(sorted_data) - 1) * (p / 100)
+    lower = int(idx)
+    upper = lower + 1
+    if upper >= len(sorted_data):
+        return sorted_data[lower]
+    return sorted_data[lower] + (idx - lower) * (sorted_data[upper] - sorted_data[lower])
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+# -- CLI ----------------------------------------------------------------------
 
 
 def parse_args() -> LoadTestConfig:
     parser = argparse.ArgumentParser(description="Load test for QASM3 task pipeline")
     parser.add_argument(
-        "--tasks",
-        type=int,
+        "--tasks", type=int,
         default=int(os.environ.get("LOAD_TEST_TASKS", "20")),
         help="Number of tasks to submit (default: 20)",
     )
     parser.add_argument(
-        "--concurrency",
-        type=int,
+        "--concurrency", type=int,
         default=int(os.environ.get("LOAD_TEST_CONCURRENCY", "10")),
         help="Max concurrent submissions (default: 10)",
     )
     parser.add_argument(
-        "--base-url",
-        type=str,
+        "--base-url", type=str,
         default=os.environ.get("LOAD_TEST_BASE_URL", "http://localhost:8000"),
         help="API base URL (default: http://localhost:8000)",
     )
     parser.add_argument(
-        "--timeout",
-        type=int,
+        "--timeout", type=int,
         default=int(os.environ.get("LOAD_TEST_TIMEOUT", "120")),
         help="Per-task poll timeout in seconds (default: 120)",
     )
     parser.add_argument(
-        "--shots",
-        type=int,
+        "--shots", type=int,
         default=int(os.environ.get("SHOTS", "1024")),
         help="Expected shots for correctness validation (default: 1024)",
     )
