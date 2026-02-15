@@ -79,7 +79,19 @@ For running tests locally (outside Docker):
 
 ## Quick Start
 
-### 1. Build and run all services
+### One-command setup (recommended)
+
+```bash
+./run.sh
+```
+
+This single script checks prerequisites, builds and starts all services, waits for health checks, and runs a demo quantum circuit end-to-end. You'll see simulation results printed in your terminal.
+
+> Also available as a [GitHub Release](https://github.com/afikmenashe21/Quantom-Processing/releases) — download, extract, and run `./run.sh`.
+
+### Manual setup
+
+#### 1. Build and run all services
 
 ```bash
 cd deploy
@@ -88,7 +100,7 @@ docker compose up --build
 
 This starts all 5 services. Wait for the health checks to pass (usually ~30s for first build).
 
-### 2. Submit a task
+#### 2. Submit a task
 
 ```bash
 curl -X POST http://localhost:8000/tasks \
@@ -101,13 +113,13 @@ Response:
 {"task_id": "a1b2c3d4-...", "message": "Task submitted successfully."}
 ```
 
-### 3. Poll for results
+#### 3. Poll for results
 
 ```bash
 curl http://localhost:8000/tasks/<task_id>
 ```
 
-### 4. Stop all services
+#### 4. Stop all services
 
 ```bash
 docker compose down
