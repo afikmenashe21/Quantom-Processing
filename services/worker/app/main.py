@@ -10,6 +10,7 @@ from concurrent.futures.process import BrokenProcessPool
 import pika
 
 from shared.db import build_session_factory
+from shared.logging import mask_credentials
 
 from app.config import settings
 from app.db_repository import mark_completed, mark_failed, try_claim_task
@@ -46,17 +47,15 @@ def handle_incoming_message(
         channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
         return
 
-    logger.info("worker_received task_id=%s", task_id)
-
     with session_factory() as db:
         task = try_claim_task(db, task_id)
         if task is None:
-            logger.info("task_skip task_id=%s (not claimable)", task_id)
+            logger.info("task_skipped task_id=%s reason=not_claimable", task_id)
             channel.basic_ack(delivery_tag=method.delivery_tag)
             return
 
     try:
-        future = pool.submit(execute_qasm3, task["qc"], settings.shots)
+        future = pool.submit(execute_qasm3, str(task_id), task["qc"], settings.shots)
     except (BrokenProcessPool, RuntimeError) as e:
         logger.error("pool_submit_failed task_id=%s error=%s", task_id, e)
         with session_factory() as db:
@@ -66,7 +65,7 @@ def handle_incoming_message(
 
     in_flight[method.delivery_tag] = (future, task_id, method.delivery_tag)
     logger.info(
-        "task_submitted_to_pool task_id=%s delivery_tag=%s in_flight=%d",
+        "task_claimed_and_submitted task_id=%s delivery_tag=%d in_flight=%d",
         task_id, method.delivery_tag, len(in_flight),
     )
 
@@ -156,8 +155,8 @@ def run() -> None:
     )
 
     logger.info(
-        "worker_starting shots=%s concurrency=%d rabbitmq_url=%s tasks_queue=%s",
-        settings.shots, concurrency, settings.rabbitmq_url, settings.tasks_queue,
+        "worker_starting shots=%s concurrency=%d rabbitmq=%s queue=%s",
+        settings.shots, concurrency, mask_credentials(settings.rabbitmq_url), settings.tasks_queue,
     )
 
     shutting_down = False

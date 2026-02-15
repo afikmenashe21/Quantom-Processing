@@ -30,9 +30,7 @@ def try_claim_task(db: Session, task_id: uuid.UUID) -> dict | None:
     ).fetchone()
     db.commit()
     if result is None:
-        logger.debug("task_claim_missed task_id=%s", task_id)
         return None
-    logger.info("task_claimed task_id=%s", task_id)
     return {"id": result.id, "qc": result.qc}
 
 

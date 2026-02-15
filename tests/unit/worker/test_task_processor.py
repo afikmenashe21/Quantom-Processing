@@ -16,7 +16,7 @@ class TestExecuteQasm3:
         mock_sim.run.return_value.result.return_value = mock_result
 
         from app.task_processor import execute_qasm3
-        result = execute_qasm3("OPENQASM 3; qubit q;", shots=100)
+        result = execute_qasm3("test-task-id", "OPENQASM 3; qubit q;", shots=100)
 
         assert isinstance(result, dict)
         assert result == {"0": 60, "1": 40}
@@ -31,7 +31,7 @@ class TestExecuteQasm3:
         mock_aer_cls.return_value.run.return_value.result.return_value = mock_result
 
         from app.task_processor import execute_qasm3
-        result = execute_qasm3("OPENQASM 3;", shots=256)
+        result = execute_qasm3("test-task-id", "OPENQASM 3;", shots=256)
         assert sum(result.values()) == 256
 
     @patch("app.task_processor.AerSimulator")
@@ -52,7 +52,7 @@ class TestExecuteQasm3:
         mock_aer_cls.return_value.run.return_value.result.return_value = mock_result
 
         from app.task_processor import execute_qasm3
-        result = execute_qasm3("OPENQASM 3;", shots=100)
+        result = execute_qasm3("test-task-id", "OPENQASM 3;", shots=100)
         for v in result.values():
             assert type(v) is int
         assert result == {"0": 60, "1": 40}
@@ -64,4 +64,4 @@ class TestExecuteQasm3:
 
         from app.task_processor import execute_qasm3
         with pytest.raises(Exception, match="Invalid QASM3"):
-            execute_qasm3("this is not valid qasm3", shots=100)
+            execute_qasm3("test-task-id", "this is not valid qasm3", shots=100)

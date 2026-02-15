@@ -59,7 +59,6 @@ def get_listen_dsn() -> str:
 
 def run() -> None:
     session_factory = build_session_factory(settings.database_url, pool_size=2)
-    logger.info("db_session_factory_created")
 
     rmq = RabbitMQClient()
 
@@ -91,7 +90,7 @@ def run() -> None:
                 while True:
                     gen = conn.notifies(timeout=settings.outbox_poll_interval_sec)
                     for notify in gen:
-                        logger.info("notify_received payload=%s", notify.payload)
+                        logger.debug("notify_received payload=%s", notify.payload)
                         try:
                             drain_outbox_batch(session_factory, rmq)
                         except Exception as e:

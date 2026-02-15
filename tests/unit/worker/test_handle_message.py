@@ -82,7 +82,7 @@ class TestHandleIncomingMessage:
                                 json.dumps({"task_id": tid}).encode())
 
         mock_pool.submit.assert_called_once_with(
-            app.main.execute_qasm3, "OPENQASM 3;", 1024,
+            app.main.execute_qasm3, tid, "OPENQASM 3;", 1024,
         )
         assert 42 in in_flight
         assert in_flight[42][0] is mock_future

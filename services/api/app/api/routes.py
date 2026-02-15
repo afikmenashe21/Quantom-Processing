@@ -51,7 +51,7 @@ def submit_task(body: CreateTaskRequest, request: Request, db: Session = Depends
         raise HTTPException(status_code=413, detail="QASM3 payload too large.")
 
     task = create_task_with_outbox(db, body.qc)
-    logger.info("task_created task_id=%s", task.id)
+    logger.info("task_created task_id=%s qc_size=%d", task.id, len(body.qc))
     return CreateTaskResponse(task_id=str(task.id), message="Task submitted successfully.")
 
 
